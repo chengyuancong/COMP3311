@@ -1,0 +1,181 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... print list of rules for a program or stream
+
+import sys
+import psycopg2
+from helpers import *
+
+# define any local helper functions here
+# ...
+
+# print stream info
+def printDS(database, info):
+    print(f"{info[3]} stream(s) from {info[0]}")
+    for stream_code in info[5].split(","):
+        stream = getStream(database, stream_code)
+        if stream is None:
+            print(f"- {stream_code} ???")
+        else:
+            print(f"- {stream_code} {stream[2]}")
+
+
+# print CC rule info
+def printCC(database, info):
+    string = info[0]
+    course_codes = info[5].split(",")
+    if len(course_codes) > 1:
+        string = "all courses from " + string
+
+    print(string)
+    for course_code in course_codes:
+        if '{' in course_code:
+            printAlternatives(database, course_code)
+        else:
+            name = getCourseName(database, course_code)
+            if name is None:
+                print(f"- {course_code} ???")
+            else:
+                print(f"- {course_code} {name[0]}")
+
+
+# print alternative courses in aog course list
+def printAlternatives(database, alters):
+    alters = alters[1:-1].split(";")
+    name = getCourseName(database, alters[0])
+    if name is None:
+        print(f"- {alters[0]} ???")
+    else:
+        print(f"- {alters[0]} {name[0]}")
+
+    for alter in alters[1:]:
+        name = getCourseName(database, alter)
+        if name is None:
+            print(f"  or {alter} ???")
+        else:
+            print(f"  or {alter} {name[0]}")
+
+
+# print PE rule info
+def printPE(database, info):
+    string = None
+    if info[2] is None and info[3] is None:
+        string = ""
+    elif info[2] is not None and info[3] is None:
+        string = f"at least {info[2]} UOC courses from "
+    elif info[2] is None and info[3] is not None:
+        string = f"up to {info[3]} UOC courses from "
+    else:
+        if info[2] == info[3]:
+            string = f"{info[2]} UOC courses from "
+        else:
+            string = f"between {info[2]} and {info[3]} UOC courses from "
+
+    print(string + f"{info[0]}")
+
+    if info[4] == 'enumerated':
+        for course_code in info[5].split(","):
+            name = getCourseName(database, course_code)
+            if name is None:
+                print(f"- {course_code} ???")
+            else:
+                print(f"- {course_code} {name[0]}")
+    else:
+        print("- courses matching " + info[5])
+
+
+# print FE rule info
+def printFE(info):
+    if info[2] is None and info[3] is None:
+        print("")
+    elif info[2] is not None and info[3] is None:
+        print(f"at least {info[2]} UOC of Free Electives")
+    elif info[2] is None and info[3] is not None:
+        print(f"up to {info[3]} UOC of Free Electives")
+    else:
+        if info[2] == info[3]:
+            print(f"{info[2]} UOC of Free Electives")
+        else:
+            print(f"between {info[2]} and {info[3]} UOC of Free Electives")
+
+# print GE rule info
+def printGE(info):
+    print(f"{info[2]} UOC of General Education")
+
+
+# set up some globals
+usage = f"Usage: {sys.argv[0]} (ProgramCode|StreamCode)"
+db = None
+
+# process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+    print(usage)
+    exit(1)
+code = sys.argv[1]
+if len(code) == 4:
+    codeOf = "program"
+elif len(code) == 6:
+    codeOf = "stream"
+
+try:
+    db = psycopg2.connect("dbname=mymyunsw")
+    if codeOf == "program":
+        progInfo = getProgram(db, code)
+        if not progInfo:
+            print(f"Invalid program code {code}")
+            exit()
+        # print(progInfo)  #debug
+        # List the rules for Program
+        # ... add your code here ...
+        year = progInfo[6]/12
+        orgunit = getProgramOrg(db, code)
+        print(f"{progInfo[0]} {progInfo[2]}, {progInfo[3]} UOC, {year:.1f} years")
+        print(f"- offered by {orgunit[0]}")
+        print("Academic Requirements:")
+
+        for t in getProgramRule(db, code):
+            # print(t)
+            if t[1] == 'DS':
+                printDS(db, t)
+            elif t[1] == 'CC':
+                printCC(db, t)
+            elif t[1] == 'PE':
+                printPE(db, t)
+            elif t[1] == 'FE':
+                printFE(t)
+            elif t[1] == 'GE':
+                printGE(t)
+
+    elif codeOf == "stream":
+        strmInfo = getStream(db, code)
+        if not strmInfo:
+            print(f"Invalid stream code {code}")
+            exit()
+        # print(strmInfo)  #debug
+        # List the rules for Stream
+        # ... add your code here ...
+        orgunit = getStreamOrg(db, code)
+        print(f"{strmInfo[1]} {strmInfo[2]}")
+        print(f"- offered by {orgunit[0]}")
+        print("Academic Requirements:")
+
+        for t in getStreamRule(db, code):
+            # print(t)
+            if t[1] == 'DS':
+                printDS(db, t)
+            elif t[1] == 'CC':
+                printCC(db, t)
+            elif t[1] == 'PE':
+                printPE(db, t)
+            elif t[1] == 'FE':
+                printFE(t)
+            elif t[1] == 'GE':
+                printGE(t)
+
+
+except Exception as err:
+    print(err)
+finally:
+    if db:
+        db.close()

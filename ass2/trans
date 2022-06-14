@@ -1,0 +1,83 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... print a transcript for a given student
+
+import sys
+import psycopg2
+import re
+from helpers import getStudent, getTranscriptRecord
+
+# define any local helper functions here
+
+# set up some globals
+
+usage = f"Usage: {sys.argv[0]} zID"
+db = None
+
+# process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+    print(usage)
+    exit(1)
+zid = sys.argv[1]
+if zid[0] == 'z':
+    zid = zid[1:8]
+digits = re.compile("^\d{7}$")
+if not digits.match(zid):
+    print(f"Invalid student ID {zid}")
+    exit(1)
+
+# manipulate database
+
+try:
+    db = psycopg2.connect("dbname=mymyunsw")
+    stuInfo = getStudent(db, zid)
+    if not stuInfo:
+        print(f"Invalid student ID {zid}")
+        exit()
+
+    # print(stuInfo) # debug
+    # Print transcript for Student
+    # ... add your code here ...
+    # grades that count uoc
+    xuoc = ('A', 'A+', 'A-', 'B', 'B+', 'B-', 'C', 'C+', 'C-', 'D', 'D+', 'D-',
+            'HD', 'DN', 'CR', 'PS', 'XE', 'SY', 'EC', 'RC', 'NC')
+    fail = ('AF', 'FL', 'UF', 'E', 'F')
+    # nothing = ('AS', 'AW', 'PW', 'NA', 'RD', 'NF', 'PE', 'WD', 'WJ')
+
+    # grades that count uoc in wam
+    wamYes = ('HD', 'DN', 'CR', 'PS', 'AF', 'FL', 'UF', 'E', 'F')
+
+    total_achieved_uoc = 0
+    total_attempted_uoc = 0
+    weighted_mark_sum = 0
+    print(f"{stuInfo[0]} {stuInfo[1]}, {stuInfo[2]}")
+    for t in getTranscriptRecord(db, zid):
+        # count passed course uoc
+        if t[4] in xuoc:
+            total_achieved_uoc += t[5]
+
+        if t[4] in wamYes:
+            total_attempted_uoc += t[5]
+            # + uoc * mark if mark is not 0
+            if t[3] is not None:
+                weighted_mark_sum += t[5]*t[3]
+
+        # print(t)
+        record = f"{t[0]} {t[1]} {t[2]:<32s}{t[3]:>3} {t[4]:2s}" if t[3] is not None \
+            else f"{t[0]} {t[1]} {t[2]:<32s}{'-':>3} {t[4]:2s}"
+        if t[4] in xuoc:
+            record += f"  {t[5]:2d}uoc"
+        elif t[4] in fail:
+            record += "   fail"
+
+        print(record)
+
+    wam = 0 if total_attempted_uoc == 0 else weighted_mark_sum/total_attempted_uoc
+    print(f"UOC = {total_achieved_uoc}, WAM = {wam:.1f}")
+
+except Exception as err:
+    print("DB error: ", err)
+finally:
+    if db:
+        db.close()

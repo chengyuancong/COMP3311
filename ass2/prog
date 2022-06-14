@@ -1,0 +1,437 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... progression check for a given student
+
+import sys
+import psycopg2
+import re
+from helpers import *
+
+# set up some globals
+
+usage = f"Usage: {sys.argv[0]} zID [Program Stream]"
+db = None
+# grades that counts uoc
+xuoc = ('A', 'A+', 'A-', 'B', 'B+', 'B-', 'C', 'C+', 'C-', 'D', 'D+', 'D-',
+        'HD', 'DN', 'CR', 'PS', 'XE', 'SY', 'EC', 'RC', 'NC')
+
+# grades that indicates fail
+fail = ('AF', 'FL', 'UF', 'E', 'F')
+
+# grades that neither fail nor completed
+nothing = ('AS', 'AW', 'PW', 'NA', 'RD', 'NF', 'PE', 'WD', 'WJ')
+
+
+# define any local helper functions here
+
+# sort all rules for a student,
+# CC first, stream CC before program CC
+# then PE, stream PE before program PE
+# then GE, finally FE
+def sortRules(strmrules, progrules):
+    rules = []
+    for tup in strmrules:
+        if tup[1] == 'CC':
+            rules.append(tup)
+
+    for tup in progrules:
+        if tup[1] == 'CC':
+            rules.append(tup)
+
+    for tup in strmrules:
+        if tup[1] == 'PE':
+            rules.append(tup)
+
+    for tup in progrules:
+        if tup[1] == 'PE':
+            rules.append(tup)
+
+    for tup in progrules:
+        if tup[1] == 'GE':
+            rules.append(tup)
+
+    for tup in strmrules:
+        if tup[1] == 'FE':
+            rules.append(tup)
+
+    return rules
+
+
+# put all completed course records into a list
+# all records are stored in a dictionary
+# towards stores which rule was satisfied by this course
+def initCompletedList(record):
+    completed_courses = []
+    for tup in record:
+        course = {
+            'code': tup[0],
+            'term': tup[1],
+            'name': tup[2],
+            'mark': tup[3],
+            'grade': tup[4],
+            'uoc': tup[5],
+            'towards': None
+        }
+        completed_courses.append(course)
+
+    for course in completed_courses:
+        # print '-' if no mark
+        if course['mark'] is None:
+            course['mark'] = '-'
+
+        # if uoc is not counted
+        if course['grade'] not in xuoc:
+            course['towards'] = 'does not count'
+            # uoc is "fail" or nothing
+            if course['grade'] in fail:
+                course['uoc'] = 'fail'
+            elif course['grade'] in nothing:
+                course['uoc'] = ''
+
+    return completed_courses
+
+
+# put all rule into a list
+# each rule is stored in a dictionary
+# 'completed' indicated how many uoc are counted as satisfies this rule
+def initRuleList(db, record):
+    ruleslist = []
+    for tup in record:
+        rule = {
+            'name': tup[0],
+            'type': tup[1],
+            'min': tup[2],
+            'max': tup[3],
+            'defby': tup[4],
+            'course': None,
+            'completed': 0
+        }
+        # aog course list depends on rule type and aog def type
+        if rule['defby'] == 'enumerated':
+            rule['course'] = initEnumCCList(tup[5]) if rule['type'] == 'CC' else initEnumPEList(tup[5])
+        else:
+            rule['course'] = initPatternList(db, tup[5])
+
+        ruleslist.append(rule)
+    return ruleslist
+
+
+# put all course code of CC rule into a list
+def initEnumCCList(aog_str):
+    codes = []
+    for code in aog_str.split(','):
+        if '{' in code:
+            codes.append(code[1:-1].split(";"))
+        else:
+            codes.append(code)
+    return codes
+
+
+# put all course code of enum PE rule into a list
+def initEnumPEList(aog_str):
+    codes = []
+    for code in aog_str.split(','):
+        if '{' in code:
+            for alter in code[1:-1].split(";"):
+                codes.append(alter)
+        else:
+            codes.append(code)
+    return codes
+
+
+# put all course code of pattern rule into a list
+def initPatternList(db, aog_str):
+    codes = []
+    for code in aog_str.split(","):
+        if '#' in code:
+            codes += getMatchCourse(db, code)
+        else:
+            codes.append(code)
+    return codes
+
+
+# check student's all completed courses required by CC rule
+# if a course is in CC rule, mark it towards CC and count uoc to CC
+def checkCC(rule, completed):
+    for code in rule['course'][:]:
+        # if required course code is single course code
+        if type(code) == str:
+            for course in completed:
+                if course['towards'] is None and course['code'] == code:
+                    course['towards'] = f"towards {rule['name']}"
+                    rule['course'].remove(code)
+                    break
+        # if required course code is alternatives
+        else:
+            for course in completed:
+                if course['towards'] is None and course['code'] in code:
+                    course['towards'] = f"towards {rule['name']}"
+                    rule['course'].remove(code)
+                    break
+
+# check student's all completed courses,
+# if a course is in this PE rule, mark it towards PE and count uoc to PE
+def checkPE(rule, completed):
+    if rule['max'] is not None:
+        for course in completed:
+            if course['towards'] is None and course['code'] in rule['course']:
+                course['towards'] = f"towards {rule['name']}"
+                rule['completed'] += course['uoc']
+
+            # stop checking if reached maximum requirement
+            if rule['completed'] == rule['max']:
+                break
+
+    elif rule['max'] is None:
+        for course in completed:
+            if course['towards'] is None and course['code'] in rule['course']:
+                course['towards'] = f"towards {rule['name']}"
+                rule['completed'] += course['uoc']
+
+
+# check student's all completed courses if it is GE course
+def checkGE(rule, completed):
+    for course in completed:
+        if course['towards'] is None and course['code'] in rule['course']:
+            course['towards'] = f"towards {rule['name']}"
+            rule['completed'] += course['uoc']
+
+        # stop counting if reached 12 uoc
+        if rule['completed'] == 12:
+            break
+
+
+# mark all remaining not checked courses as free elective
+def checkFE(rule, completed):
+    if rule['max'] is not None:
+        for course in completed:
+            if course['towards'] is None:
+                course['towards'] = f"towards Free Electives"
+                rule['completed'] += course['uoc']
+
+            # stop counting if reached maximum uoc of free elective
+            if rule['completed'] == rule['max']:
+                break
+
+    elif rule['max'] is None:
+        for course in completed:
+            if course['towards'] is None:
+                course['towards'] = f"towards Free Electives"
+                rule['completed'] += course['uoc']
+
+# check all courses and mark it if it is adk course
+def checkADK(adkRule, completed):
+    for course in completed:
+        if course['grade'] in xuoc and course['code'] in adkRule['course']:
+            if course['towards'] is None:
+                course['towards'] = 'ADK Courses'
+            else:
+                course['towards'] += ' + ADK Courses'
+
+            adkRule['completed'] += course['uoc']
+
+
+def printRemainingCC(db, rule):
+    text = ''
+    for code in rule['course']:
+        if type(code) is not str:
+            name = getCourseName(db, code[0])
+            if name is None:
+                text += f"- {code[0]} ???\n"
+            else:
+                text += f"- {code[0]} {name[0]}\n"
+
+            for alter in code[1:]:
+                name = getCourseName(db, alter)
+                if name is None:
+                    text += f"  or {alter} ???\n"
+                else:
+                    text += f"  or {alter} {name[0]}\n"
+        else:
+            name = getCourseName(db, code)
+            if name is None:
+                text += f"- {code} ???\n"
+            else:
+                text += f"- {code} {name[0]}\n"
+
+    return text
+
+def printRemainingPE(rule):
+    text = ''
+    if rule['min'] is not None:
+        if rule['max'] is None:
+            if rule['completed'] < rule['min']:
+                text += f"at least {rule['min'] - rule['completed']} UOC courses from {rule['name']}\n"
+        else:
+            if rule['min'] == rule['max']:
+                if rule['completed'] < rule['min']:
+                    text += f"{rule['min'] - rule['completed']} UOC courses from {rule['name']}\n"
+            else:
+                if rule['completed'] <= rule['min']:
+                    text += f"between {rule['min'] - rule['completed']} and " \
+                           f"{rule['max'] - rule['completed']} UOC courses from {rule['name']}\n"
+
+    return text
+
+def printRemainingADK(adkrule):
+    text = ''
+    if adkrule['completed'] < adkrule['min']:
+        text += f"{adkrule['min'] - adkrule['completed']} UOC from {adkrule['name']}\n"
+
+    return text
+
+def printRemainingGE(rule):
+    text = ''
+    if rule['completed'] < 12:
+        text += f"{12 - rule['completed']} UOC of General Education\n"
+
+    return text
+
+def printRemainingFE(rule):
+    text = ''
+    if rule['min'] is not None:
+        if rule['max'] is None:
+            if rule['completed'] < rule['min']:
+                text += f"at least {rule['min'] - rule['completed']} UOC of Free Electives\n"
+        else:
+            if rule['min'] == rule['max']:
+                if rule['completed'] < rule['min']:
+                    text += f"{rule['min'] - rule['completed']} UOC of Free Electives\n"
+            else:
+                if rule['completed'] <= rule['min']:
+                    text += f"between {rule['min'] - rule['completed']} and " \
+                            f"{rule['max'] - rule['completed']} UOC of Free Electives\n"
+
+    return text
+
+
+# process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+    print(usage)
+    exit(1)
+zid = sys.argv[1]
+if zid[0] == 'z':
+    zid = zid[1:8]
+digits = re.compile("^\d{7}$")
+if not digits.match(zid):
+    print("Invalid student ID")
+    exit(1)
+
+progCode = None
+strmCode = None
+
+if argc == 4:
+    progCode = sys.argv[2]
+    strmCode = sys.argv[3]
+
+# manipulate database
+
+try:
+    db = psycopg2.connect("dbname=mymyunsw")
+    stuInfo = getStudent(db, zid)
+    # print(stuInfo) # debug
+    if not stuInfo:
+        print(f"Invalid student id {zid}")
+        exit()
+
+    if progCode:
+        progInfo = getProgram(db, progCode)
+        if not progInfo:
+            print(f"Invalid program code {progCode}")
+            exit()
+        # print(progInfo)  #debug
+
+    if strmCode:
+        strmInfo = getStream(db, strmCode)
+        if not strmInfo:
+            print(f"Invalid stream code {strmCode}")
+            exit()
+        # print(strmInfo)  #debug
+
+    if progCode is None and strmCode is None:
+        info = getRecentProgramAndStream(db, zid)
+        progCode = str(info[0])
+        strmCode = info[1]
+        progInfo = getProgram(db, progCode)
+        strmInfo = getStream(db, strmCode)
+
+    print(f"{zid} {stuInfo[1]}, {stuInfo[2]}")
+    print(f"  {progInfo[1]} {progInfo[2]}")
+    print(f"  {strmInfo[1]} {strmInfo[2]}")
+
+    # generate rule list and record list
+    completed = initCompletedList(getTranscriptRecord(db, zid))
+    strmRules = getStreamRule(db, strmCode)
+    progRules = getProgramRule(db, progCode)
+    rules = initRuleList(db, sortRules(strmRules, progRules))
+
+    # check all rules and mark courses in records
+    adkRule = None
+    for rule in rules:
+        if rule['type'] == 'CC':
+            checkCC(rule, completed)
+        elif rule['type'] == 'PE':
+            if rule['name'] == 'ADK Courses':
+                adkRule = rule
+            else:
+                checkPE(rule, completed)
+        elif rule['type'] == 'GE':
+            checkGE(rule, completed)
+        elif rule['type'] == 'FE':
+            checkFE(rule, completed)
+
+    # if there is an adk rule, check it for all courses
+    if adkRule is not None:
+        checkADK(adkRule, completed)
+
+    # if there are still courses not been marked
+    # they are not counted
+    for course in completed:
+        if course['towards'] is None:
+            course['uoc'] = 0
+            course['towards'] = 'does not satisfy any rule'
+
+    # calculated completed uoc
+    uoc = 0
+    for course in completed:
+        if course['grade'] in xuoc:
+            uoc += course['uoc']
+
+    # print completed records
+    print("\nCompleted:")
+    for course in completed:
+        string = f"{course['code']} {course['term']} {course['name']:<32s}{course['mark']:>3} {course['grade']:2s}"
+        string += f"  {course['uoc']:2d}uoc" if type(course['uoc']) == int else f"   {course['uoc']}"
+        string += f" {course['towards']}"
+        print(string)
+    print(f"UOC = {uoc} so far")
+
+    # collect text of remaining uoc requirements
+    remainingText = ''
+    for rule in rules:
+        if rule['type'] == 'CC':
+            remainingText += printRemainingCC(db, rule)
+        elif rule['type'] == 'PE':
+            if rule['name'] != 'ADK Courses':
+                remainingText += printRemainingPE(rule)
+            else:
+                remainingText += printRemainingADK(rule)
+        elif rule['type'] == 'GE':
+            remainingText += printRemainingGE(rule)
+        elif rule['type'] == 'FE':
+            remainingText += printRemainingFE(rule)
+
+    # if no requirements, student is eligible to graduate
+    # else print remaining requirements
+    if remainingText == '':
+        print("Eligible to graduate")
+    else:
+        print("\nRemaining to complete degree:")
+        print(remainingText, end="")
+
+except Exception as err:
+    print("DB error: ", err)
+finally:
+    if db:
+        db.close()
